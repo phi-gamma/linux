@@ -302,6 +302,25 @@ impl ModuleInfo {
     }
 }
 
+fn maybe_param_const(it: &mut token_stream::IntoIter) -> Option<String> {
+    if let Some(TokenTree::Punct(punct)) = it.next() {
+        let this = punct.as_char();
+        if this == '=' {
+            if let Some(TokenTree::Ident(ident)) = it.next() {
+                assert_eq!(expect_punct(it), ':');
+                Some(ident.to_string())
+            } else {
+                panic!("Expected Ident");
+            }
+        } else {
+            assert_eq!(this, ':');
+            None
+        }
+    } else {
+        panic!("Expected Punct(':' or '=')");
+    }
+}
+
 pub(crate) fn module(ts: TokenStream) -> TokenStream {
     let mut it = ts.into_iter();
 
@@ -337,7 +356,7 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                 None => break,
             };
 
-            assert_eq!(expect_punct(&mut it), ':');
+            let param_const = maybe_param_const(&mut it);
             let param_type = expect_type(&mut it);
             let group = expect_group(&mut it);
             assert_eq!(expect_punct(&mut it), ',');
@@ -431,6 +450,9 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                 name = info.name,
                 param_name = param_name,
             );
+
+            let const_name = param_const.as_ref().unwrap_or(&param_name);
+
             write!(
                 modinfo.buffer,
                 "
@@ -440,7 +462,7 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
 
                 impl __{name}_{param_name} {{ {read_func} }}
 
-                const {param_name}: __{name}_{param_name} = __{name}_{param_name};
+                const {const_name}: __{name}_{param_name} = __{name}_{param_name};
 
                 // Note: the C macro that generates the static structs for the `__param` section
                 // asks for them to be `aligned(sizeof(void *))`. However, that was put in place
