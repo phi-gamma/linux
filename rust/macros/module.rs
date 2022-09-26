@@ -164,7 +164,6 @@ fn get_default(param_type: &ParamType, param_it: &mut token_stream::IntoIter) ->
             max_length: _,
         } => try_simple_param_val(param_type),
     };
-    assert_eq!(expect_ident(param_it), "default");
     assert_eq!(expect_punct(param_it), ':');
     let default = match param_type {
         ParamType::Ident(_) => try_param_val(param_it).expect("Expected default param value"),
@@ -345,7 +344,20 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
             assert_eq!(group.delimiter(), Delimiter::Brace);
 
             let mut param_it = group.stream().into_iter();
-            let param_default = get_default(&param_type, &mut param_it);
+            let (command_line_name, param_default) = match expect_ident(&mut param_it).as_str() {
+                "command_line_name" => {
+                    assert_eq!(expect_punct(&mut param_it), ':');
+                    let command_line_name = expect_string(&mut param_it);
+                    assert_eq!(expect_punct(&mut param_it), ',');
+                    assert_eq!(expect_ident(&mut param_it), "default");
+                    (
+                        Some(command_line_name),
+                        get_default(&param_type, &mut param_it),
+                    )
+                }
+                "default" => (None, get_default(&param_type, &mut param_it)),
+                _ => panic!("Expected literal command_line_name or default"),
+            };
             let param_permissions = get_literal(&mut param_it, "permissions");
             let param_description = get_string(&mut param_it, "description");
             expect_end(&mut param_it);
@@ -457,11 +469,11 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
 
                 #[cfg(not(MODULE))]
                 const __{name}_{param_name}_name: *const core::ffi::c_char =
-                    b\"{name}.{param_name}\\0\" as *const _ as *const core::ffi::c_char;
+                    b\"{name}.{command_line_name}\\0\" as *const _ as *const core::ffi::c_char;
 
                 #[cfg(MODULE)]
                 const __{name}_{param_name}_name: *const core::ffi::c_char =
-                    b\"{param_name}\\0\" as *const _ as *const core::ffi::c_char;
+                    b\"{command_line_name}\\0\" as *const _ as *const core::ffi::c_char;
 
                 #[link_section = \"__param\"]
                 #[used]
@@ -482,6 +494,7 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                     }});
                 ",
                 name = info.name,
+                command_line_name = command_line_name.unwrap_or_else(|| param_name.clone()),
                 param_type_internal = param_type_internal,
                 read_func = read_func,
                 param_default = param_default,

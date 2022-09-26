@@ -36,6 +36,12 @@ module! {
             permissions: 0,
             description: "Example of array",
         },
+        MY_PARAM: i32 {
+            command_line_name: "my_param",
+            default: 1337,
+            permissions: 0o644,
+            description: "Example of different command line name",
+        },
     },
 }
 
@@ -56,6 +62,7 @@ impl kernel::Module for RustModuleParameters {
             );
             pr_info!("  my_usize:   {}\n", my_usize.read(&lock));
             pr_info!("  my_array:   {:?}\n", my_array.read());
+            pr_info!("  my_param:   {}\n", MY_PARAM.read(&lock));
         }
 
         Ok(RustModuleParameters)
