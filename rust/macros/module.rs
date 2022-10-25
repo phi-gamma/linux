@@ -5,7 +5,7 @@ use std::fmt::Write;
 
 use crate::helpers::*;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum ParamType {
     Ident(String),
     Array { vals: String, max_length: usize },
@@ -302,6 +302,93 @@ impl ModuleInfo {
     }
 }
 
+#[derive(Debug)]
+struct ModuleParam {
+    name: String,
+    type_: ParamType,
+    default: String,
+    permissions: String,
+    description: String,
+}
+
+impl ModuleParam {
+    fn parse(it: &mut token_stream::IntoIter) -> Option<Self> {
+        let name = match it.next() {
+            Some(TokenTree::Ident(ident)) => ident.to_string(),
+            Some(_) => panic!("Expected Ident or end"),
+            None => return None,
+        };
+
+        assert_eq!(expect_punct(it), ':');
+        let type_ = expect_type(it);
+        let group = expect_group(it);
+        assert_eq!(expect_punct(it), ',');
+
+        assert_eq!(group.delimiter(), Delimiter::Brace);
+
+        let mut param_it = group.stream().into_iter();
+        let default = get_default(&type_, &mut param_it);
+        let permissions = get_literal(&mut param_it, "permissions");
+        let description = get_string(&mut param_it, "description");
+        expect_end(&mut param_it);
+
+        Some(Self {
+            default,
+            name,
+            type_,
+            permissions,
+            description,
+        })
+    }
+
+    fn ops(&self) -> String {
+        match self.type_ {
+            ParamType::Ident(ref type_) => param_ops_path(type_).to_string(),
+            ParamType::Array {
+                ref vals,
+                max_length,
+            } => generated_array_ops_name(vals, max_length),
+        }
+    }
+
+    fn kernel_type(&self) -> String {
+        match self.type_ {
+            ParamType::Ident(ref type_) => type_.to_string(),
+            ParamType::Array {
+                ref vals,
+                max_length,
+            } => format!("__rust_array_param_{}_{}", vals, max_length),
+        }
+    }
+
+    fn array_type(&self) -> Option<(String, usize)> {
+        match self.type_ {
+            ParamType::Array {
+                ref vals,
+                max_length,
+            } => Some((vals.clone(), max_length)),
+            ParamType::Ident(_) => None,
+        }
+    }
+
+    fn internal_type(&self) -> String {
+        match self.type_ {
+            ParamType::Ident(ref type_) => match type_.as_ref() {
+                "str" => "kernel::module_param::StringParam".to_string(),
+                other => other.to_string(),
+            },
+            ParamType::Array {
+                ref vals,
+                max_length,
+            } => format!(
+                "kernel::module_param::ArrayParam<{vals}, {max_length}>",
+                vals = vals,
+                max_length = max_length
+            ),
+        }
+    }
+}
+
 pub(crate) fn module(ts: TokenStream) -> TokenStream {
     let mut it = ts.into_iter();
 
@@ -330,62 +417,17 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
 
         let mut it = params.stream().into_iter();
 
-        loop {
-            let param_name = match it.next() {
-                Some(TokenTree::Ident(ident)) => ident.to_string(),
-                Some(_) => panic!("Expected Ident or end"),
-                None => break,
-            };
-
-            assert_eq!(expect_punct(&mut it), ':');
-            let param_type = expect_type(&mut it);
-            let group = expect_group(&mut it);
-            assert_eq!(expect_punct(&mut it), ',');
-
-            assert_eq!(group.delimiter(), Delimiter::Brace);
-
-            let mut param_it = group.stream().into_iter();
-            let param_default = get_default(&param_type, &mut param_it);
-            let param_permissions = get_literal(&mut param_it, "permissions");
-            let param_description = get_string(&mut param_it, "description");
-            expect_end(&mut param_it);
-
+        while let Some(param) = ModuleParam::parse(&mut it) {
             // TODO: More primitive types.
             // TODO: Other kinds: unsafes, etc.
-            let (param_kernel_type, ops): (String, _) = match param_type {
-                ParamType::Ident(ref param_type) => (
-                    param_type.to_string(),
-                    param_ops_path(param_type).to_string(),
-                ),
-                ParamType::Array {
-                    ref vals,
-                    max_length,
-                } => {
-                    array_types_to_generate.push((vals.clone(), max_length));
-                    (
-                        format!("__rust_array_param_{}_{}", vals, max_length),
-                        generated_array_ops_name(vals, max_length),
-                    )
-                }
-            };
+            param.array_type().map(|(vals, max_length)| {
+                array_types_to_generate.push((vals, max_length));
+            });
 
-            modinfo.emit_param("parmtype", &param_name, &param_kernel_type);
-            modinfo.emit_param("parm", &param_name, &param_description);
-            let param_type_internal = match param_type {
-                ParamType::Ident(ref param_type) => match param_type.as_ref() {
-                    "str" => "kernel::module_param::StringParam".to_string(),
-                    other => other.to_string(),
-                },
-                ParamType::Array {
-                    ref vals,
-                    max_length,
-                } => format!(
-                    "kernel::module_param::ArrayParam<{vals}, {max_length}>",
-                    vals = vals,
-                    max_length = max_length
-                ),
-            };
-            let read_func = if permissions_are_readonly(&param_permissions) {
+            modinfo.emit_param("parmtype", &param.name, &param.kernel_type());
+            modinfo.emit_param("parm", &param.name, &param.description);
+
+            let read_func = if permissions_are_readonly(&param.permissions) {
                 format!(
                     "
                         fn read(&self)
@@ -400,8 +442,8 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                         }}
                     ",
                     name = info.name,
-                    param_name = param_name,
-                    param_type_internal = param_type_internal,
+                    param_name = param.name,
+                    param_type_internal = param.internal_type(),
                 )
             } else {
                 format!(
@@ -417,8 +459,8 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                         }}
                     ",
                     name = info.name,
-                    param_name = param_name,
-                    param_type_internal = param_type_internal,
+                    param_name = param.name,
+                    param_type_internal = param.internal_type(),
                 )
             };
             let kparam = format!(
@@ -429,7 +471,7 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                     }},
                 ",
                 name = info.name,
-                param_name = param_name,
+                param_name = param.name,
             );
             write!(
                 modinfo.buffer,
@@ -482,12 +524,12 @@ pub(crate) fn module(ts: TokenStream) -> TokenStream {
                     }});
                 ",
                 name = info.name,
-                param_type_internal = param_type_internal,
+                param_type_internal = param.internal_type(),
                 read_func = read_func,
-                param_default = param_default,
-                param_name = param_name,
-                ops = ops,
-                permissions = param_permissions,
+                param_default = param.default,
+                param_name = param.name,
+                ops = param.ops(),
+                permissions = param.permissions,
                 kparam = kparam,
             )
             .unwrap();
